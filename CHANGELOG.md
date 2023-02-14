@@ -19,6 +19,8 @@ before starting to add changes.
 - Added cweagans/composer-patches as dependency
 - Removed drupal/dynamic_entity_reference (It belongs in os2forms/os2forms_forloeb)
 - Changed composer patching configuration
+- Updated os2forms_permissions_by_term
+- Updated os2forms_webform_list
 
 ## 1.10.0
 
