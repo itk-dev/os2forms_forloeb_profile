@@ -25,4 +25,4 @@ be thoroughly tested.
   affiliation. If no match is found access is denied.
 - The first taxonomy term in the user_affiliation taxonomy should be "Anonymous" with Taxonomy term permissions allowed
   for "Anonymous users"-role. This allows editors to make nodes accessible to anonymous users while removing it in backend
-from views and dropdowns.
+  from views and dropdowns.
