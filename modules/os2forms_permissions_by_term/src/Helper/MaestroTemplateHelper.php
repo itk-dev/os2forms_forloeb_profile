@@ -132,7 +132,7 @@ class MaestroTemplateHelper {
     $form['maestro_template_permissions_by_term'] = [
       '#type' => 'details',
       '#open' => TRUE,
-      '#title' => $this->t('Meastro template access'),
+      '#title' => 'Meastro template access',
       '#tree' => TRUE,
       '#weight' => -99,
     ];
@@ -269,8 +269,8 @@ class MaestroTemplateHelper {
 
       case 'webform_handler_form':
         // Alter webform handler list select list.
-        switch ($form['#webform_handler_id']) {
-          case 'opret_forloeb_fra_flow':
+        switch ($form['#webform_handler_plugin_id']) {
+          case 'maestro':
             $form['settings']['maestro_template']['#options'] = $this->limitOptions($this->getUserTerms($this->account), $form['settings']['maestro_template']['#options']);
             break;
         }
@@ -296,7 +296,7 @@ class MaestroTemplateHelper {
     $displayId = $view->getDisplay()->display['id'];
     /** @var \Drupal\Core\Session\AccountInterface $user */
     $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
-    $maestroTemplates = $this->entityTypeManager->getStorage('maestro_template')->getQuery()->execute();
+    $maestroTemplates = $this->entityTypeManager->getStorage('maestro_template')->getQuery()->accessCheck(TRUE)->execute();
     $allowedList = [];
     foreach ($maestroTemplates as $template) {
       /** @var \Drupal\Core\Config\Entity\ConfigEntityInterface $templateEntity */
