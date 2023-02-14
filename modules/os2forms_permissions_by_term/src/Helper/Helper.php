@@ -14,8 +14,10 @@ use Drupal\Core\StringTranslation\StringTranslationTrait;
 use Drupal\Core\Url;
 use Drupal\node\NodeInterface;
 use Drupal\permissions_by_term\Service\AccessStorage;
+use Drupal\permissions_by_term\Service\AccessCheck;
 use Drupal\user\Entity\User;
 use Drupal\webform\WebformInterface;
+use Drupal\Core\Language\LanguageManager;
 
 /**
  * Helper class for os2forms permissions by term.
@@ -51,6 +53,21 @@ class Helper {
    */
   protected ConfigFactory $configFactory;
 
+
+  /**
+   * Configuration Factory.
+   *
+   * @var \Drupal\permissions_by_term\Service\AccessCheck
+   */
+  protected AccessCheck $accessCheck;
+
+  /**
+   * The language manager.
+   *
+   * @var \Drupal\Core\Language\LanguageManager
+   */
+  protected LanguageManager $languageManager;
+
   /**
    * Helper constructor.
    *
@@ -62,12 +79,18 @@ class Helper {
    *   The Account proxy interface.
    * @param \Drupal\Core\Config\ConfigFactory $configFactory
    *   The config factory.
+   * @param \Drupal\permissions_by_term\Service\AccessCheck $accessCheck
+   *   The permissions by term access check service.
+   * @param \Drupal\Core\Language\LanguageManager $languageManager
+   *   The language manager.
    */
-  public function __construct(AccessStorage $accessStorage, EntityTypeManagerInterface $entity_type_manager, AccountProxyInterface $account, ConfigFactory $configFactory) {
+  public function __construct(AccessStorage $accessStorage, EntityTypeManagerInterface $entity_type_manager, AccountProxyInterface $account, ConfigFactory $configFactory, AccessCheck $accessCheck, LanguageManager $languageManager) {
     $this->accessStorage = $accessStorage;
+    $this->accessCheck = $accessCheck;
     $this->entityTypeManager = $entity_type_manager;
     $this->account = $account;
     $this->configFactory = $configFactory;
+    $this->languageManager = $languageManager;
   }
 
   /**
@@ -89,73 +112,72 @@ class Helper {
     /** @var \Drupal\Core\Entity\EntityForm $formObject */
     $formObject = $form_state->getFormObject();
     $node = $formObject->getEntity();
-    if ('webform' !== $node->bundle()) {
-      return;
-    }
-    $term_data = [];
-    $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
-    if (1 === (int) $this->account->id()) {
-      $userTerms = [];
-      $permissionsByTermBundles = $this->configFactory->get('permissions_by_term.settings')->get('target_bundles');
-      foreach ($permissionsByTermBundles as $bundle) {
-        $terms = $this->entityTypeManager->getStorage('taxonomy_term')->loadTree($bundle);
-        foreach ($terms as $term) {
-          $userTerms[] = $term->tid;
+    if ('webform' === $node->bundle()) {
+      $term_data = [];
+      $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
+      if (1 === (int) $this->account->id()) {
+        $userTerms = [];
+        $permissionsByTermBundles = $this->configFactory->get('permissions_by_term.settings')->get('target_bundles');
+        foreach ($permissionsByTermBundles as $bundle) {
+          $terms = $this->entityTypeManager->getStorage('taxonomy_term')->loadTree($bundle);
+          foreach ($terms as $term) {
+            $userTerms[] = $term->tid;
+          }
         }
       }
-    }
-    else {
-      $userTerms = $this->accessStorage->getPermittedTids($user->id(), $user->getRoles());
-    }
-    $terms = $this->entityTypeManager->getStorage('taxonomy_term')->loadMultiple($userTerms);
-    foreach ($terms as $term) {
-      $term_data[$term->id()] = $term->label();
-    }
+      else {
+        $userTerms = $this->accessStorage->getPermittedTids($user->id(), $user->getRoles());
+      }
+      $terms = $this->entityTypeManager->getStorage('taxonomy_term')->loadMultiple($userTerms);
+      foreach ($terms as $term) {
+        $term_data[$term->id()] = $term->label();
+      }
 
-    // Remove any options that allow anonymous access to the webform.
-    $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
-    foreach ($anonymousTerms as $termId) {
-      unset($term_data[$termId]);
+      // Remove any options that allow anonymous access to the webform.
+      $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
+      foreach ($anonymousTerms as $termId) {
+        unset($term_data[$termId]);
+      }
+
+      // Make sure title is first when creating a new webform.
+      if ('add' === $hook) {
+        $form['title']['#weight'] = -100;
+      }
+
+      // Get default settings for webform.
+      if ('settings' === $hook) {
+        /** @var \Drupal\Core\Entity\EntityForm $webform_settings_form */
+        $webform_settings_form = $form_state->getFormObject();
+        /** @var \Drupal\webform\WebformInterface $webform */
+        $webform = $webform_settings_form->getEntity();
+        $defaultSettings = $webform->getThirdPartySetting('os2forms_permissions_by_term', 'settings');
+      }
+
+      $form['os2forms_permissions_by_term'] = [
+        '#type' => 'details',
+        '#open' => TRUE,
+        '#title' => 'Webform access',
+        '#tree' => TRUE,
+        '#weight' => -99,
+      ];
+
+      $form['os2forms_permissions_by_term']['os2forms_access'] = [
+        '#type' => 'checkboxes',
+        '#required' => TRUE,
+        '#title' => $this->t('Access'),
+        '#default_value' => $defaultSettings ?? [],
+        '#options' => $term_data,
+        '#description' => $this->t('Limit access to this webform.'),
+      ];
+
+      // Set access value automatically if user only has one term option.
+      if ('add' === $hook && 1 === count($term_data)) {
+        $form['os2forms_permissions_by_term']['os2forms_access']['#disabled'] = TRUE;
+        $form['os2forms_permissions_by_term']['os2forms_access']['#value'] = [array_key_first($term_data) => array_key_first($term_data)];
+      }
+
+      $form['actions']['submit']['#submit'][] = [$this, 'webformSubmit'];
     }
-
-    // Make sure title is first when creating a new webform.
-    if ('add' === $hook) {
-      $form['title']['#weight'] = -100;
-    }
-
-    // Get default settings for webform.
-    if ('settings' === $hook) {
-      /** @var \Drupal\Core\Entity\EntityForm $webform_settings_form */
-      $webform_settings_form = $form_state->getFormObject();
-      /** @var \Drupal\webform\WebformInterface $webform */
-      $webform = $webform_settings_form->getEntity();
-      $defaultSettings = $webform->getThirdPartySetting('os2forms_permissions_by_term', 'settings');
-    }
-
-    $form['os2forms_permissions_by_term'] = [
-      '#type' => 'details',
-      '#open' => TRUE,
-      '#title' => $this->t('Webform access'),
-      '#tree' => TRUE,
-      '#weight' => -99,
-    ];
-
-    $form['os2forms_permissions_by_term']['os2forms_access'] = [
-      '#type' => 'checkboxes',
-      '#required' => TRUE,
-      '#title' => $this->t('Access'),
-      '#default_value' => $defaultSettings ?? [],
-      '#options' => $term_data,
-      '#description' => $this->t('Limit access to this webform.'),
-    ];
-
-    // Set access value automatically if user only has one term option.
-    if ('add' === $hook && 1 === count($term_data)) {
-      $form['os2forms_permissions_by_term']['os2forms_access']['#disabled'] = TRUE;
-      $form['os2forms_permissions_by_term']['os2forms_access']['#value'] = [array_key_first($term_data) => array_key_first($term_data)];
-    }
-
-    $form['actions']['submit']['#submit'][] = [$this, 'webformSubmit'];
   }
 
   /**
@@ -228,13 +250,30 @@ class Helper {
     if ('webform' === $node->bundle()) {
       switch ($operation) {
         case 'view':
+        case 'view all revisions':
           // Deny access to node view if no permission by term is set.
           $nodePermissionsByTerm = $node->field_os2forms_permissions->getValue();
-          return empty($nodePermissionsByTerm)
-            ? AccessResult::forbidden()
-            : AccessResult::neutral();
+          if (empty($nodePermissionsByTerm)) {
+            return AccessResult::forbidden();
+          }
+
+          // Disallow access to node if related webform is closed and user
+          // doesn't have edit rights.
+          if ('closed' === ($node->webform[0]->status ?? NULL)) {
+            if (!$node->access('update', $account)) {
+              return AccessResult::forbidden();
+            }
+          }
+
+          // Allow node view access if node is tagged with anonymous users.
+          foreach ($nodePermissionsByTerm as $termId) {
+            if ($this->accessCheck->isTermAllowedByUserRole($termId['target_id'], 'anonymous', $this->languageManager->getCurrentLanguage()->getId())) {
+              return AccessResult::Allowed();
+            }
+          }
       }
     }
+    return AccessResult::neutral();
   }
 
   /**
@@ -280,34 +319,32 @@ class Helper {
     /** @var \Drupal\Core\Entity\EntityForm $formObject */
     $formObject = $form_state->getFormObject();
     $nodeBundle = $formObject->getEntity()->bundle();
-    if (1 === (int) $this->account->id() || 'webform' !== $nodeBundle) {
-      return;
-    }
+    if (1 !== (int) $this->account->id() && 'webform' === $nodeBundle) {
+      // Run custom submit handler before default node submission.
+      array_unshift(
+        $form['actions']['submit']['#submit'],
+        [$this, 'nodeWebformPermisisonsByTermSubmit']
+      );
+      $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
+      $userTerms = $this->accessStorage->getPermittedTids($user->id(), $user->getRoles());
+      $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
+      $webformReference = $form['webform']['widget'][0]['target_id']['#default_value'];
+      // If a webform is referenced from the node add message.
+      if ($webformReference) {
+        $url = URL::fromRoute('entity.webform.settings_access', ['webform' => $webformReference])->toString();
+        $form['field_os2forms_permissions']['widget'][0]['#prefix'] =
+          '<div class="alert alert-warning">' . $this->t('Anonymous access to view this content is set on <a href="@url">the related webform access page</a> . (Create submissions permission)', ['@url' => $url]) . '</div>';
+      }
+      // Disable anonymous terms. They should always be fetched from webform.
+      foreach ($anonymousTerms as $termId) {
+        $form['field_os2forms_permissions']['widget'][$termId]['#disabled'] = TRUE;
+      }
 
-    // Run custom submit handler before default node submission.
-    array_unshift(
-      $form['actions']['submit']['#submit'],
-      [$this, 'nodeWebformPermisisonsByTermSubmit']
-    );
-    $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
-    $userTerms = $this->accessStorage->getPermittedTids($user->id(), $user->getRoles());
-    $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
-    $webformReference = $form['webform']['widget'][0]['target_id']['#default_value'];
-    // If a webform is referenced from the node add message.
-    if ($webformReference) {
-      $url = URL::fromRoute('entity.webform.settings_access', ['webform' => $webformReference])->toString();
-      $form['field_os2forms_permissions']['widget'][0]['#prefix'] =
-        '<div class="alert alert-warning">' . $this->t('Anonymous access to view this content is set on <a href="@url">the related webform access page</a> . (Create submissions permission)', ['@url' => $url]) . '</div>';
-    }
-    // Disable anonymous terms. They should always be fetched from webform.
-    foreach ($anonymousTerms as $termId) {
-      $form['field_os2forms_permissions']['widget'][$termId]['#disabled'] = TRUE;
-    }
-
-    // Set access value automatically if user only has one term option.
-    if (1 === count($userTerms)) {
-      $form['field_os2forms_permissions']['widget']['#disabled'] = TRUE;
-      $form['field_os2forms_permissions']['widget']['#default_value'][] = $userTerms[0];
+      // Set access value automatically if user only has one term option.
+      if (1 === count($userTerms)) {
+        $form['field_os2forms_permissions']['widget']['#disabled'] = TRUE;
+        $form['field_os2forms_permissions']['widget']['#default_value'][] = $userTerms[0];
+      }
     }
   }
 
@@ -346,22 +383,21 @@ class Helper {
    */
   public function optionsListAlter(array &$options, array $context) {
     // Alter the field_os2forms_permissions options list.
-    if ('node.field_os2forms_permissions' !== $context['fieldDefinition']->getFieldStorageDefinition()->id()) {
-      return;
-    }
-    // Limit options to those available on user profile.
-    $options = [];
-    $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
-    $userTerms = $this->accessStorage->getPermittedTids($user->id(), $user->getRoles());
-    foreach ($userTerms as $userTerm) {
-      $term = $this->entityTypeManager->getStorage('taxonomy_term')->load($userTerm);
-      $options[$userTerm] = $term->label();
-    }
-    $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
-    foreach ($anonymousTerms as $termId) {
-      $term = $this->entityTypeManager->getStorage('taxonomy_term')->load($termId);
-      $label = $this->t('@term_label (Note: View permission only. This setting depends on the related webform.)', ['@term_label' => $term->label()]);
-      $options = [$termId => $label] + $options;
+    if ('node.field_os2forms_permissions' == $context['fieldDefinition']->getFieldStorageDefinition()->id()) {
+      // Limit options to those available on user profile.
+      $options = [];
+      $user = $this->entityTypeManager->getStorage('user')->load($this->account->id());
+      $userTerms = $this->accessStorage->getPermittedTids($user->id(), $user->getRoles());
+      foreach ($userTerms as $userTerm) {
+        $term = $this->entityTypeManager->getStorage('taxonomy_term')->load($userTerm);
+        $options[$userTerm] = $term->label();
+      }
+      $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
+      foreach ($anonymousTerms as $termId) {
+        $term = $this->entityTypeManager->getStorage('taxonomy_term')->load($termId);
+        $label = $this->t('@term_label (Note: View permission only. This setting depends on the related webform.)', ['@term_label' => $term->label()]);
+        $options = [$termId => $label] + $options;
+      }
     }
   }
 
@@ -376,19 +412,18 @@ class Helper {
   public function nodeWebformPermisisonsByTermSubmit(array $form, FormStateInterface $form_state) {
     $webformReference = $form_state->getValue('webform');
     $webformTarget = $webformReference['0']['target_id'] ?? NULL;
-    if (!$webformTarget) {
-      return;
-    }
-    $existingValues = $form_state->getValue('field_os2forms_permissions');
-    $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
-    $anonymousUser = User::getAnonymousUser();
-    $referencedWebform = $this->entityTypeManager->getStorage('webform')->load($webformTarget);
-    foreach ($anonymousTerms as $termId) {
-      if ($referencedWebform->access('submission_create', $anonymousUser)) {
-        $existingValues[] = ['target_id' => $termId];
+    if ($webformTarget) {
+      $existingValues = $form_state->getValue('field_os2forms_permissions');
+      $anonymousTerms = $this->accessStorage->getPermittedTids(0, ['anonymous']);
+      $anonymousUser = User::getAnonymousUser();
+      $referencedWebform = $this->entityTypeManager->getStorage('webform')->load($webformTarget);
+      foreach ($anonymousTerms as $termId) {
+        if ($referencedWebform->access('submission_create', $anonymousUser)) {
+          $existingValues[] = ['target_id' => $termId];
+        }
       }
+      $form_state->setValue('field_os2forms_permissions', $existingValues);
     }
-    $form_state->setValue('field_os2forms_permissions', $existingValues);
   }
 
   /**
@@ -422,9 +457,7 @@ class Helper {
         }
       }
       else {
-        if (is_array($option)) {
-          $this->filterWebformSelectOptions($option, $result, $key);
-        }
+        $this->filterWebformSelectOptions($option, $result, $key);
       }
     }
   }
